@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex Workspace</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <div id="app" v-cloak>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">C</span><span>Codex Workspace</span></div>
+        <button class="new-session" @click="openCreateDialog">+ 新建会话</button>
+        <div class="section-label">会话</div>
+        <nav class="sessions" aria-label="会话列表">
+          <div v-for="thread in threads" :key="thread.id" class="session" :class="{ active: thread.id === activeId }" @click="selectThread(thread.id)" role="button" tabindex="0" @keydown.enter="selectThread(thread.id)">
+            <span class="session-icon">⌁</span>
+            <span class="session-copy">
+              <span class="session-title">{{ threadTitle(thread) }}</span>
+              <span class="session-meta">{{ threadCwd(thread) || '未指定工作目录' }}</span>
+            </span>
+            <button class="archive-button" type="button" title="归档" aria-label="归档" @click.stop="archiveThread(thread.id)">×</button>
+          </div>
+        </nav>
+        <div class="sidebar-footer">
+          <button class="server-status" @click="showSetup = true">
+            <span class="status-dot" :class="{ ready: serverReady }"></span>
+            {{ serverReady ? 'App Server 已连接' : '连接 App Server' }}
+          </button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <span class="topbar-title">{{ activeThread ? threadTitle(activeThread) : 'Codex Workspace' }}</span>
+          <span v-if="activeThread && threadCwd(activeThread)" class="topbar-dir">{{ threadCwd(activeThread) }}</span>
+        </header>
+        <section class="content">
+          <div v-if="!activeThread" class="empty">
+            <h1>开始一个新任务</h1>
+            <p>{{ serverReady ? '创建会话后，可为 Codex 指定工作目录，或在不绑定目录的情况下开始。' : '连接本地 Codex App Server 后，即可读取和创建真实会话。' }}</p>
+            <button class="new-session" @click="openCreateDialog">+ 新建会话</button>
+            <div v-if="connectionError" class="notice error">{{ connectionError }}</div>
+          </div>
+
+          <article v-else class="conversation">
+            <div ref="messageList" class="messages">
+              <div v-if="loadingThread" class="notice">正在加载会话内容...</div>
+              <template v-else>
+                <div v-for="message in messages" :key="message.id" class="message" :class="message.kind">
+                  <template v-if="message.kind === 'user'">
+                    <div class="user-bubble markdown" v-html="renderMarkdown(message.text)"></div>
+                  </template>
+                  <template v-else-if="message.kind === 'assistant'">
+                    <div class="assistant-message markdown" v-html="renderMarkdown(message.text)"></div>
+                  </template>
+                  <template v-else>
+                    <button class="thinking-toggle" @click="message.expanded = !message.expanded">
+                      <span class="thinking-icon">⌁</span>
+                      <span>{{ message.completed ? '已完成思考' : '正在思考...' }}</span>
+                      <span class="thinking-action">{{ message.expanded ? '收起' : '展开' }}</span>
+                    </button>
+                    <pre v-if="message.expanded" class="thinking-content">{{ message.text || '正在整理思路...' }}</pre>
+                  </template>
+                </div>
+                <div v-if="conversationError" class="notice error">{{ conversationError }}</div>
+                <div v-if="!messages.length && !conversationError" class="notice">这个会话还没有消息。</div>
+              </template>
+            </div>
+
+            <form class="composer" @submit.prevent="sendMessage">
+              <div class="composer-input">
+                <textarea id= "user-input" v-model="draftMessage" :disabled="sending" placeholder="给 Codex 发消息..." @keydown.enter.exact.prevent="sendMessage"></textarea>
+              <div class="composer-toolbar">
+                <div class="generation-options">
+                  <select v-model="selectedModel" :disabled="sending || !models.length" aria-label="选择模型" @change="updateEfforts">
+                    <option v-if="!models.length" value="">默认模型</option>
+                    <option v-for="model in models" :key="model.id" :value="model.id">{{ model.displayName || model.id }}</option>
+                  </select>
+                  <select v-model="selectedEffort" :disabled="sending || !efforts.length" aria-label="选择推理强度">
+                    <option v-for="effort in efforts" :key="effort.value" :value="effort.value">{{ effort.label }}</option>
+                  </select>
+                </div>
+                <button v-if="!sending" type="submit" class="send-button" :disabled="!draftMessage.trim()" aria-label="发送消息">↑</button>
+                <button v-else type="button" class="send-button stop" aria-label="停止生成" title="停止生成" @click="stopTurn">■</button>
+              </div>
+              </div>
+            </form>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div v-if="showCreate" class="overlay" @click.self="showCreate = false">
+      <form class="modal" @submit.prevent="createSession">
+        <h2>新建会话</h2>
+        <p class="modal-description">工作目录会作为 <code>thread/start</code> 的 <code>cwd</code> 参数传给 Codex。</p>
+        <label for="title">会话名称</label>
+        <input id="title" v-model.trim="draft.title" autocomplete="off" placeholder="例如：修复登录问题" autofocus>
+        <label for="workdir">工作目录（可选）</label>
+        <input id="workdir" v-model.trim="draft.workdir" autocomplete="off" placeholder="/Users/name/projects/example">
+        <p class="field-hint">请填写本机上的绝对路径；留空则由 App Server 使用其默认目录。</p>
+        <div class="actions">
+          <button type="button" class="button" @click="showCreate = false">取消</button>
+          <button type="submit" class="button primary">创建会话</button>
+        </div>
+      </form>
+    </div>
+
+    <div v-if="showSetup" class="overlay" @click.self="showSetup = false">
+      <section class="modal">
+        <h2>启动 Codex App Server</h2>
+        <p class="modal-description">页面无法连接本地 WebSocket 代理。运行启动脚本后会自动重试连接。</p>
+        <div class="setup-command">
+          <code>./start.sh</code>
+          <button class="copy" @click="copyCommand">{{ copied ? '已复制' : '复制' }}</button>
+        </div>
+        <label for="server-url">代理 WebSocket 地址</label>
+        <input id="server-url" v-model.trim="serverUrl" autocomplete="off">
+        <p v-if="connectionError" class="field-hint error-text">{{ connectionError }}</p>
+        <div class="actions">
+          <button class="button" @click="showSetup = false">稍后处理</button>
+          <button class="button primary" @click="connect">重试连接</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>
